@@ -1,13 +1,14 @@
 Name:                zkvar
-Version:             0.1
-Synopsis:            ZooKeeper configurable variable
--- Description:
+Version:             0.2
+Synopsis:            Zookept MVar
+Description:         A little experiment abstracting Zookeeper
 License:             BSD3
 License-file:        LICENSE
 Author:              Kim Altintop
 Maintainer:          kim@soundcloud.com
--- Copyright:
+Copyright:           2011 Kim Altintop
 Category:            Data
+Stability:           Experimental
 Build-type:          Simple
 Cabal-version:       >=1.2
 

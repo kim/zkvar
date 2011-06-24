@@ -2,50 +2,60 @@ module ZKVar
   ( ZKVar(..)
   , ZKHandle
   , initZK
-  , newZKVar
-  , getZKVar
+  , withZK
+  , newEmptyZKVar
+  , takeZKVar
+  , tryTakeZKVar
+  , takeZKVarOr
+  , putZKVar
   ) where
 
 import Control.Applicative
-import Data.IORef
-import qualified Zookeeper.Core as ZK
+import Control.Concurrent.MVar
+import Data.Maybe
+import qualified Zookeeper.Core  as ZK
+import qualified Zookeeper.Utils as ZKU
 
 type Path = String
-
-data ZKVar = ZKVar
-  { zk :: ZK.Handle
-  , path :: Path
-  , defaultValue :: String
-  , value :: IORef String
-  }
-
 type ZKHandle = ZK.Handle
+
+data ZKVar a = ZKVar ZKHandle Path
 
 initZK :: String -> IO ZKHandle
 initZK host = ZK.init host Nothing 10000 Nothing
 
-newZKVar :: ZKHandle -> Path -> String -> IO ZKVar
-newZKVar zh p defv = zkvar <$> getOr' defv
-  where
-    zkvar    = ZKVar zh p defv
-    getOr' x = do
-      ref <- newIORef defv
-      val <- getOr zh p ref x
-      writeIORef ref val
-      return ref
+withZK :: String -> (ZKHandle -> IO a) -> IO a
+withZK host = ZKU.withHandle host
 
-getZKVar :: ZKVar -> IO String
-getZKVar = readIORef . value
+newEmptyZKVar :: ZKHandle -> Path -> ZKVar a
+newEmptyZKVar = ZKVar
 
-getOr :: ZKHandle -> Path -> IORef String -> String -> IO String
-getOr zh p ref defv = exists >>= maybe (return defv) (\_ -> get)
-  where
-    watch' = Just (watch defv ref)
-    exists = ZK.exists zh p watch'
-    get    = ZK.get zh p watch' >>= \(v,_) -> return v
+takeZKVar :: Read a => ZKVar a -> IO a
+takeZKVar z@(ZKVar zk p) = do
+  m <- newEmptyMVar
+  v <- ZK.exists zk p $ Just $ \_ _ _ _ -> get z >>= putMVar m
+  if isJust v then get z else takeMVar m
 
-watch :: String -> IORef String -> ZK.Watcher
-watch defv v zh = handle
-  where
-    handle _ _ = update
-    update p = getOr zh p v defv >>= \x -> atomicModifyIORef v (\_ -> (x, ()))
+tryTakeZKVar :: Read a => ZKVar a -> IO (Maybe a)
+tryTakeZKVar z = exists z >>= \z' ->
+                 if isJust z' then Just <$> get z else return Nothing
+
+takeZKVarOr :: Read a => ZKVar a -> a -> IO a
+takeZKVarOr z defv = fromMaybe defv <$> tryTakeZKVar z
+
+putZKVar :: Show a => ZKVar a -> a -> IO (ZKVar a)
+putZKVar z@(ZKVar zk p)  v = do
+  z' <- exists z
+  let v' = show v
+  _  <- if isJust z'
+          then ZK.set zk p v' Nothing
+          else ZK.create zk p v' [ZK.Ephemeral] ZK.openAclUnsafe >> return ()
+  return z
+
+-- util
+
+exists :: ZKVar a -> IO (Maybe ZK.Stat)
+exists (ZKVar zk p) = ZK.exists zk p Nothing
+
+get :: Read a => ZKVar a -> IO a
+get (ZKVar zk p) = ZK.get zk p Nothing >>= \(v,_) -> (return . read) v
