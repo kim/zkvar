@@ -18,6 +18,6 @@ Source-Repository head
 
 Library
   Exposed-modules: ZKVar
-  Build-depends:   base >= 3 && < 5, zookeeper
+  Build-depends:   base >= 3 && < 5, zookeeper, bytestring
   Ghc-Options:     -Wall -O2 -threaded
   hs-source-dirs:  src
