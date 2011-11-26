@@ -1,29 +1,32 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
 module ZKVar
-  ( ZKVar(..)
-  , ZKHandle
+  ( -- * manipulate ZKVar
+    ZKVar(..)
   , children
   , exists
-  , initZK
   , mkdir
   , mkdir_p
-  , newEmptyZKVar
-  , putZKVar
-  , releaseZK
+  , new
+  , put
   , rm
   , rm_r
-  , takeZKVar
-  , takeZKVarOr
-  , tryTakeZKVar
+  , take
+  , takeOr
+  , tryTake
   , watch
+  -- * manage ZK handle
+  , ZKHandle
+  , initZK
+  , releaseZK
   , withZK
   ) where
 
 import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Monad
-import Data.ByteString.Char8
+import Data.ByteString.Char8 hiding (take)
 import Data.Maybe
+import Prelude hiding (take)
 
 import qualified Control.Exception as E
 import qualified Data.List         as L
@@ -44,25 +47,24 @@ releaseZK = ZK.close
 withZK :: String -> (ZKHandle -> IO a) -> IO a
 withZK = ZKU.withHandle
 
-newEmptyZKVar :: ZKHandle -> Path -> ZKVar a
-newEmptyZKVar = ZKVar
+new :: ZKHandle -> Path -> ZKVar a
+new = ZKVar
 
-takeZKVar :: Read a => ZKVar a -> IO a
-takeZKVar z@(ZKVar zk p) = do
+take :: Read a => ZKVar a -> IO a
+take z@(ZKVar zk p) = do
   m <- newEmptyMVar
   v <- ZK.exists zk p $ Just $ \_ _ _ _ -> unsafeGet z >>= putMVar m
   maybe (takeMVar m) (\_ -> unsafeGet z) v
 
-tryTakeZKVar :: Read a => ZKVar a -> IO (Maybe a)
-tryTakeZKVar z = exists z >>= maybe (return Nothing)
-                                    (\_ -> Just <$> unsafeGet z)
+tryTake :: Read a => ZKVar a -> IO (Maybe a)
+tryTake z = exists z >>= maybe (return Nothing) (\_ -> Just <$> unsafeGet z)
 
-takeZKVarOr :: Read a => ZKVar a -> a -> IO a
-takeZKVarOr z defv = fromMaybe defv <$> tryTakeZKVar z
+takeOr :: Read a => ZKVar a -> a -> IO a
+takeOr z defv = fromMaybe defv <$> tryTake z
 
-putZKVar :: Show a => ZKVar a -> a -> [ZK.CreateFlag] -> IO (ZKVar a)
-putZKVar z@(ZKVar zk p) v fs =
-  exists z >>= maybe (mkdirp >>= \z' -> putZKVar z' v fs)
+put :: Show a => ZKVar a -> a -> [ZK.CreateFlag] -> IO (ZKVar a)
+put z@(ZKVar zk p) v fs =
+  exists z >>= maybe (mkdirp >>= \z' -> put z' v fs)
                      (\_ -> set >> return z)
   where
     set    = ZK.set zk p (show v) Nothing
@@ -94,7 +96,7 @@ mkdir_p z fs = do
 children :: ZKVar a -> IO [ZKVar a]
 children (ZKVar zk p) = do
   cs <- ZK.getChildren zk p Nothing
-  return $ L.map (newEmptyZKVar zk . (parent_path ++)) cs
+  return $ L.map (new zk . (parent_path ++)) cs
   where
     parent_path = p ++ "/"
 
@@ -130,5 +132,5 @@ getOrWatch z@(ZKVar zk p) w =
 
 pathTo :: ZKVar a -> [ZKVar a]
 pathTo (ZKVar zk p) =
-  L.map (newEmptyZKVar zk . unpack . cons '/' . intercalate "/")
+  L.map (new zk . unpack . cons '/' . intercalate "/")
         (L.inits . L.tail . split '/' . pack $ p)
