@@ -9,11 +9,13 @@ module ZKVar
   , mkdir_p
   , newEmptyZKVar
   , putZKVar
+  , releaseZK
   , rm
   , rm_r
   , takeZKVar
   , takeZKVarOr
   , tryTakeZKVar
+  , watch
   , withZK
   ) where
 
@@ -35,6 +37,9 @@ data ZKVar a = ZKVar ZKHandle Path
 
 initZK :: String -> IO ZKHandle
 initZK host = ZK.init host Nothing 10000 Nothing
+
+releaseZK :: ZKHandle -> IO ()
+releaseZK = ZK.close
 
 withZK :: String -> (ZKHandle -> IO a) -> IO a
 withZK = ZKU.withHandle
@@ -61,7 +66,7 @@ putZKVar z@(ZKVar zk p) v fs =
                      (\_ -> set >> return z)
   where
     set    = ZK.set zk p (show v) Nothing
-    mkdirp = fmap L.head $ mkdir_p z fs
+    mkdirp = L.head <$> mkdir_p z fs
 
 exists :: ZKVar a -> IO (Maybe ZK.Stat)
 exists (ZKVar zk p) = ZK.exists zk p Nothing
@@ -76,9 +81,8 @@ mkdir z@(ZKVar zk p) fs = ZK.create zk p [] fs ZK.openAclUnsafe >> return z
 -- list reflects the path up to the given node, in reverse order (eg.
 -- ["/a/b/c", "/a/b", "/a", "/"])
 mkdir_p :: ZKVar a -> [ZK.CreateFlag] -> IO [ZKVar a]
-mkdir_p (ZKVar zk p) fs = do
-  let ps = L.map (newEmptyZKVar zk . unpack . cons '/' . intercalate "/")
-                 (L.inits . L.tail . split '/' . pack $ p)
+mkdir_p z fs = do
+  let ps = pathTo z
       ms = fs : L.replicate (L.length ps) []
   zs <- mapM mkdir' . L.zip ps $ ms
   return $ L.reverse zs
@@ -105,5 +109,26 @@ rm z@(ZKVar zk p) = do
 rm_r :: ZKVar a -> IO (ZKVar a)
 rm_r z = children z >>= mapM rm_r >> rm z
 
+-- | Watch node forever, or until it is removed. The node may not exist when
+-- calling this function. The callback function is called with @@Nothing@@ if
+-- the node was removed, @@Just a@@ if it was changed or created.
+watch :: Read a => ZKVar a -> (Maybe a -> IO ()) -> IO ()
+watch z cb = maybeChanged
+  where
+    maybeChanged    = getOrWatch z watcher >>= cb
+    watcher _ _ _ _ = maybeChanged
+
+-- util
+
 unsafeGet :: Read a => ZKVar a -> IO a
 unsafeGet (ZKVar zk p) = ZK.get zk p Nothing >>= \(v,_) -> (return . read) v
+
+getOrWatch :: Read a => ZKVar a -> ZK.Watcher -> IO (Maybe a)
+getOrWatch z@(ZKVar zk p) w =
+  ZK.exists zk p (Just w) >>=
+    maybe (return Nothing) (\_ -> Just <$> (unsafeGet z))
+
+pathTo :: ZKVar a -> [ZKVar a]
+pathTo (ZKVar zk p) =
+  L.map (newEmptyZKVar zk . unpack . cons '/' . intercalate "/")
+        (L.inits . L.tail . split '/' . pack $ p)
