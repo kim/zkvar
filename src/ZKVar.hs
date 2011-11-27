@@ -4,6 +4,8 @@ module ZKVar
     ZKVar(..)
   , children
   , exists
+  , existsOrWatch
+  , ifExists
   , mkdir
   , mkdir_p
   , new
@@ -12,6 +14,7 @@ module ZKVar
   , rm_r
   , take
   , takeOr
+  , takeOrWatch
   , tryTake
   , watch
   -- * manage ZK handle
@@ -33,8 +36,9 @@ import qualified Data.List         as L
 import qualified Zookeeper.Core    as ZK
 import qualified Zookeeper.Utils   as ZKU
 
-type Path = String
+type Path     = String
 type ZKHandle = ZK.Handle
+type Watcher  = ZK.Watcher
 
 data ZKVar a = ZKVar ZKHandle Path
 
@@ -51,27 +55,38 @@ new :: ZKHandle -> Path -> ZKVar a
 new = ZKVar
 
 take :: Read a => ZKVar a -> IO a
-take z@(ZKVar zk p) = do
+take z = do
   m <- newEmptyMVar
-  v <- ZK.exists zk p $ Just $ \_ _ _ _ -> unsafeGet z >>= putMVar m
-  maybe (takeMVar m) (\_ -> unsafeGet z) v
+  takeOrWatch z (watcher m) >>= maybe noop (putMVar m)
+  takeMVar m
+  where
+    watcher m _ _ _ _ = unsafeGet z >>= putMVar m
 
 tryTake :: Read a => ZKVar a -> IO (Maybe a)
-tryTake z = exists z >>= maybe (return Nothing) (\_ -> Just <$> unsafeGet z)
+tryTake z = tryTake' z Nothing
 
 takeOr :: Read a => ZKVar a -> a -> IO a
 takeOr z defv = fromMaybe defv <$> tryTake z
 
-put :: Show a => ZKVar a -> a -> [ZK.CreateFlag] -> IO (ZKVar a)
-put z@(ZKVar zk p) v fs =
-  exists z >>= maybe (mkdirp >>= \z' -> put z' v fs)
-                     (\_ -> set >> return z)
-  where
-    set    = ZK.set zk p (show v) Nothing
-    mkdirp = L.head <$> mkdir_p z fs
+takeOrWatch :: Read a => ZKVar a -> Watcher -> IO (Maybe a)
+takeOrWatch z w = tryTake' z (Just w)
 
-exists :: ZKVar a -> IO (Maybe ZK.Stat)
-exists (ZKVar zk p) = ZK.exists zk p Nothing
+put :: Show a => ZKVar a -> a -> [ZK.CreateFlag] -> IO (ZKVar a)
+put z v fs = ifExists z mkdirp set >> return z
+  where
+    set (ZKVar zk p) = ZK.set zk p (show v) Nothing
+    mkdirp = (\z' -> put z' v fs) . L.head <$> mkdir_p z fs >> noop
+
+exists :: ZKVar a -> IO Bool
+exists (ZKVar zk p) = isJust <$> ZK.exists zk p Nothing
+
+existsOrWatch :: ZKVar a -> Watcher -> IO Bool
+existsOrWatch (ZKVar zk p) w = isJust <$> ZK.exists zk p (Just w)
+
+-- TODO: callback return types are somewhat less-than-optimal
+ifExists :: ZKVar a -> IO () -> (ZKVar a -> IO ()) -> IO ()
+ifExists z@(ZKVar zk p) no yes =
+  ZK.exists zk p Nothing >>= maybe no (\_ -> yes z)
 
 -- | Create the node on the ZK server (without data). Throws on error, most
 -- notably if the node already exists or the parent node does _not_ yet exist.
@@ -102,10 +117,9 @@ children (ZKVar zk p) = do
 
 -- | Remove the node. Throws if the node has children (see @@rm_r@@)
 rm :: ZKVar a -> IO (ZKVar a)
-rm z@(ZKVar zk p) = do
-  exists z >>= maybe (ZK.delete zk p $ Just (-1))
-                     (\_ -> return ())
-  return z
+rm z = ifExists z noop rm' >> return z
+  where
+    rm' (ZKVar zk p) = ZK.delete zk p $ Just (-1)
 
 -- | Remove the node recursively
 rm_r :: ZKVar a -> IO (ZKVar a)
@@ -117,7 +131,7 @@ rm_r z = children z >>= mapM rm_r >> rm z
 watch :: Read a => ZKVar a -> (Maybe a -> IO ()) -> IO ()
 watch z cb = maybeChanged
   where
-    maybeChanged    = getOrWatch z watcher >>= cb
+    maybeChanged    = takeOrWatch z watcher >>= cb
     watcher _ _ _ _ = maybeChanged
 
 -- util
@@ -125,12 +139,17 @@ watch z cb = maybeChanged
 unsafeGet :: Read a => ZKVar a -> IO a
 unsafeGet (ZKVar zk p) = ZK.get zk p Nothing >>= \(v,_) -> (return . read) v
 
-getOrWatch :: Read a => ZKVar a -> ZK.Watcher -> IO (Maybe a)
-getOrWatch z@(ZKVar zk p) w =
-  ZK.exists zk p (Just w) >>=
-    maybe (return Nothing) (\_ -> Just <$> (unsafeGet z))
+tryTake' :: Read a => ZKVar a -> Maybe Watcher -> IO (Maybe a)
+tryTake' = go
+  where
+    go  z@(ZKVar zk p) (Just w) = ZK.exists zk p (Just w) >>= get z
+    go  z@(ZKVar zk p) Nothing  = ZK.exists zk p Nothing  >>= get z
+    get z = maybe (return Nothing) (\_ -> Just <$> unsafeGet z)
 
 pathTo :: ZKVar a -> [ZKVar a]
 pathTo (ZKVar zk p) =
   L.map (new zk . unpack . cons '/' . intercalate "/")
         (L.inits . L.tail . split '/' . pack $ p)
+
+noop :: IO ()
+noop = return ()
